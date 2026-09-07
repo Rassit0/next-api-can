@@ -73,16 +73,7 @@ export class PlayersController {
     return await this.playersService.findAll(paginationDto);
   }
 
-  @Get('available-persons-options')
-  @ApiOperation({
-    summary: 'Listar opciones de personas no jugadores',
-    description:
-      'Retorna una lista paginada y filtrable de personas que no están registradas como jugadores.',
-  })
-  @RequirePermissions('READ_PLAYERS')
-  async getAvailablePersons(@Query() paginationDto: PaginationDto) {
-    return await this.playersService.getAvailablePersons(paginationDto);
-  }
+
 
   @Get(':id')
   @ApiOperation({

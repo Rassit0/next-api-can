@@ -93,43 +93,6 @@ export class UsersService {
     };
   }
 
-  async getPersonOptions(search?: string, page = 1, limit = 20) {
-    const skip = (page - 1) * limit;
-    const where: Prisma.PersonWhereInput = {};
-    if (search) {
-      where.OR = [
-        { name: { contains: search, mode: 'insensitive' } },
-        { lastName: { contains: search, mode: 'insensitive' } },
-        { documentNumber: { contains: search, mode: 'insensitive' } },
-      ];
-    }
-
-    const [persons, totalItems] = await Promise.all([
-      this.prisma.person.findMany({
-        where,
-        take: limit,
-        skip,
-        select: {
-          id: true,
-          name: true,
-          lastName: true,
-          documentNumber: true,
-          imageUrl: true,
-        },
-        orderBy: { createdAt: 'desc' },
-      }),
-      this.prisma.person.count({ where }),
-    ]);
-
-    const mapped = persons.map((p) => ({
-      id: p.id,
-      fullName: `${p.name} ${p.lastName}`,
-      documentNumber: p.documentNumber,
-      imageUrl: p.imageUrl,
-    }));
-
-    return createPaginationResult(mapped, totalItems, page, limit, 'Personas obtenidas');
-  }
 
   async findAll(paginationDto: UsersPaginationDto) {
     const { per_page = 10, page = 1, search, orderBy = 'asc', sortField = 'email' } = paginationDto;

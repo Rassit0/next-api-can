@@ -73,16 +73,7 @@ export class StaffController {
     return this.staffService.findAll(paginationDto);
   }
 
-  @Get('persons/available')
-  @ApiOperation({
-    summary: 'Listar opciones de personal disponible',
-    description:
-      'Retorna una lista paginada de personas que no están registradas como staff.',
-  })
-  @RequirePermissions('READ_STAFF')
-  async getAvailablePersons(@Query() paginationDto: PaginationDto) {
-    return this.staffService.getAvailablePersons(paginationDto);
-  }
+
 
   @Get(':id')
   @ApiOperation({

@@ -79,21 +79,21 @@ export class TransactionsMapper {
         const p = transaction.payment.charge.accountCharge.person;
         mappedThirdParty = {
           id: p.id,
-          name: `${p.name} ${p.lastName || ''}`.trim(),
+          name: `${p.lastName || ''} ${(p as any).secondLastName || ''} ${p.name}`.replace(/\s+/g, ' ').trim(),
           documentNumber: p.documentNumber || null,
         };
       } else if (!mappedThirdParty && transaction.payment?.charge?.membershipCharges?.[0]?.playerMembership?.player?.person) {
         const p = transaction.payment.charge.membershipCharges[0].playerMembership.player.person;
         mappedThirdParty = {
           id: p.id,
-          name: `${p.name} ${p.lastName || ''}`.trim(),
+          name: `${p.lastName || ''} ${(p as any).secondLastName || ''} ${p.name}`.replace(/\s+/g, ' ').trim(),
           documentNumber: p.documentNumber || null,
         };
       } else if (!mappedThirdParty && transaction.payment?.charge?.studentCharges?.[0]?.studentMembership?.student?.person) {
         const p = transaction.payment.charge.studentCharges[0].studentMembership.student.person;
         mappedThirdParty = {
           id: p.id,
-          name: `${p.name} ${p.lastName || ''}`.trim(),
+          name: `${p.lastName || ''} ${(p as any).secondLastName || ''} ${p.name}`.replace(/\s+/g, ' ').trim(),
           documentNumber: p.documentNumber || null,
         };
       }

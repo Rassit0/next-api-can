@@ -6,7 +6,6 @@ import { TransactionsService } from '../transactions/transactions.service';
 import { BadRequestException } from '@nestjs/common';
 import { StatusCharge, TransactionType, ChargeDirection, PaymentMethod } from '../generated/prisma/client';
 import { CreateAccountChargeDto } from './dto/create-account-charge.dto';
-import { PersonsOptionsPaginationDto } from './dto/persons-options-pagination.dto';
 
 describe('AccountChargesService', () => {
   let service: AccountChargesService;
@@ -253,55 +252,5 @@ describe('AccountChargesService', () => {
     });
   });
 
-  describe('getPersonsOptions', () => {
-    it('1. Debe retornar beneficiarios validos y respetar paginación', async () => {
-      jest.spyOn(prisma.person, 'findMany').mockResolvedValue([
-        { id: '1', name: 'John', lastName: 'Doe', secondLastName: '' },
-      ] as any);
-      jest.spyOn(prisma.person, 'count').mockResolvedValue(1);
 
-      const result = await service.getPersonsOptions({ page: 1, per_page: 10 } as PersonsOptionsPaginationDto);
-
-      expect(result.data).toHaveLength(1);
-      expect(result.data[0].fullName).toBe('John Doe');
-      expect(result.meta.totalItems).toBe(1);
-
-      expect(prisma.person.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: expect.objectContaining({
-            OR: [
-              { players: { isNot: null } },
-              { students: { isNot: null } },
-            ],
-          }),
-        }),
-      );
-    });
-
-    it('2. Búsqueda por documento o nombre', async () => {
-      jest.spyOn(prisma.person, 'findMany').mockResolvedValue([]);
-      jest.spyOn(prisma.person, 'count').mockResolvedValue(0);
-
-      await service.getPersonsOptions({ search: 'John', page: 1, per_page: 10 } as PersonsOptionsPaginationDto);
-
-      expect(prisma.person.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: expect.objectContaining({
-            OR: [
-              { players: { isNot: null } },
-              { students: { isNot: null } },
-            ],
-            AND: expect.arrayContaining([
-              expect.objectContaining({
-                OR: expect.arrayContaining([
-                  { name: { contains: 'John', mode: 'insensitive' } },
-                  { documentNumber: { contains: 'John', mode: 'insensitive' } },
-                ]),
-              }),
-            ]),
-          }),
-        }),
-      );
-    });
-  });
 });

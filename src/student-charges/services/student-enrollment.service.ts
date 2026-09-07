@@ -34,10 +34,10 @@ export class StudentEnrollmentService {
       forceFullCycleFee?: boolean;
     },
     tx?: Prisma.TransactionClient,
-  ) {
+  ): Promise<string[]> {
     const prisma = tx || this.prisma;
     const membership = await this.membershipRepo.getMembershipById(membershipId, tx);
-    if (!membership) return;
+    if (!membership) return [];
 
     const isMigratedContext = membership.isMigrated;
     const { chargeRegistration, chargeInitialCycle } = resolveFinancialEnrollmentOptions(isMigratedContext, options);
@@ -88,7 +88,8 @@ export class StudentEnrollmentService {
 
     // Usamos una transacción para garantizar atomicidad
     try {
-      const executeEnrollment = async (db: Prisma.TransactionClient) => {
+      const executeEnrollment = async (db: Prisma.TransactionClient): Promise<string[]> => {
+        const generatedChargeIds: string[] = [];
         // 1. Inscripción (Matrícula)
         let totalRegistrationAmount = 0;
         let registrationDiscount = 0;
@@ -125,12 +126,13 @@ export class StudentEnrollmentService {
                           type: TypeMembershipCharge.REGISTRATION,
                       }
                    });
+                   generatedChargeIds.push(registrationCharge.id);
                }
            }
         }
 
         // 2. Crear los CycleEnrollments y sus Charges a través del orquestador central
-        await this.cycleManager.enrollCyclesToMembership(
+        const { generatedChargeIds: cycleChargeIds } = await this.cycleManager.enrollCyclesToMembership(
           membership,
           cyclesToEnroll,
           membership.startedAt, // enrollmentDate explícito (para inscripción inicial, es el startedAt)
@@ -142,18 +144,22 @@ export class StudentEnrollmentService {
           },
           db
         );
+        generatedChargeIds.push(...cycleChargeIds);
+        return generatedChargeIds;
       };
 
+      let finalChargeIds: string[] = [];
       if (tx) {
         fs.appendFileSync('enrollment-debug.log', '[DEBUG] Executing with existing tx\n');
-        await executeEnrollment(tx);
+        finalChargeIds = await executeEnrollment(tx);
       } else {
         fs.appendFileSync('enrollment-debug.log', '[DEBUG] Executing with new tx\n');
-        await this.prisma.$transaction(async (db) => {
-          await executeEnrollment(db);
+        finalChargeIds = await this.prisma.$transaction(async (db) => {
+          return await executeEnrollment(db);
         });
       }
       this.logger.log(`Enrollment On-Demand exitoso para membresía ${membershipId}`);
+      return finalChargeIds;
     } catch (error) {
        this.logger.error(`Error en enrollment On-Demand para membresía ID ${membershipId}:`, error);
        throw error;

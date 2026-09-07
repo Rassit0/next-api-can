@@ -31,17 +31,21 @@ export class MembershipGenerationService {
     tx: Prisma.TransactionClient,
     membership: PlayerMembershipWithRelations,
     evaluationDate: Date,
-  ) {
+  ): Promise<string[]> {
+    const chargeIds: string[] = [];
     if (!membership.isMigrated || membership.chargeRegistrationOnMigration) {
-      await this.ensureRegistrationCharge(tx, membership);
+      const regId = await this.ensureRegistrationCharge(tx, membership);
+      if (regId) chargeIds.push(regId);
     }
-    await this.ensureRecurringCharges(tx, membership, evaluationDate);
+    const recIds = await this.ensureRecurringCharges(tx, membership, evaluationDate);
+    chargeIds.push(...recIds);
+    return chargeIds;
   }
 
   public async ensureRegistrationCharge(
     tx: Prisma.TransactionClient,
     membership: PlayerMembershipWithRelations,
-  ) {
+  ): Promise<string | null> {
     const startYear = membership.startedAt.getUTCFullYear();
     const startMonth = membership.startedAt.getUTCMonth() + 1;
 
@@ -51,15 +55,15 @@ export class MembershipGenerationService {
       startYear,
       startMonth,
     );
-    if (exists) return;
+    if (exists) return null;
 
     const { baseAmount, netAmount, appliedDiscounts } =
       calculateRegistrationFee(membership);
-    if (baseAmount <= 0) return;
+    if (baseAmount <= 0) return null;
 
     const description =
       'Inscripción' + formatDiscountsDescription(appliedDiscounts);
-    await tx.charge.create({
+    const charge = await tx.charge.create({
       data: MembershipChargeFactory.buildRegistrationChargePayload(
         membership.id,
         baseAmount,
@@ -69,13 +73,14 @@ export class MembershipGenerationService {
         extractDiscountReason(appliedDiscounts),
       ),
     });
+    return charge.id;
   }
 
   public async ensureRecurringCharges(
     tx: Prisma.TransactionClient,
     membership: PlayerMembershipWithRelations,
     evaluationDate: Date,
-  ) {
+  ): Promise<string[]> {
     const allCycles = simulateAllCycles(membership);
     const generationDate = this.resolveGenerationPointer(
       membership,
@@ -95,7 +100,7 @@ export class MembershipGenerationService {
         membership.nextRecurringChargeGenerationDate,
         null,
       );
-      return;
+      return [];
     }
 
     const isSeasonFeeOnly =
@@ -104,12 +109,15 @@ export class MembershipGenerationService {
         membership.paymentPlan?.isSinglePayment === true);
     const isFullPaymentPlan = membership.paymentPlan?.isSinglePayment === true;
 
+    const generatedIds: string[] = [];
+
     if (isSeasonFeeOnly) {
-      nextPointer = await this.processSinglePaymentGeneration(
+      const spId = await this.processSinglePaymentGeneration(
         tx,
         membership,
         allCycles,
       );
+      if (spId) generatedIds.push(spId);
     } else {
       const billingFrequency =
         membership.teamSeason.billingConfig?.billingFrequency || 'MONTHLY';
@@ -125,7 +133,7 @@ export class MembershipGenerationService {
         : evaluationDate;
 
       if (generationDate) {
-        nextPointer = await this.processRecurringGeneration(
+        const { nextPointer: calcPointer, chargeIds } = await this.processRecurringGeneration(
           tx,
           membership,
           allCycles,
@@ -133,6 +141,8 @@ export class MembershipGenerationService {
           evalDateToUse,
           existingChargesSet,
         );
+        generatedIds.push(...chargeIds);
+        nextPointer = calcPointer;
       }
     }
 
@@ -142,6 +152,7 @@ export class MembershipGenerationService {
       membership.nextRecurringChargeGenerationDate,
       nextPointer,
     );
+    return generatedIds;
   }
 
   public async generateAdvanceCharges(
@@ -149,8 +160,8 @@ export class MembershipGenerationService {
     membership: PlayerMembershipWithRelations,
     cyclesToGenerate: SimulatedCycle[],
     existingChargesSet?: Set<string>,
-  ): Promise<number> {
-    const { lastGeneratedCycle, count } = await this.createRecurringChargesFromCycles(
+  ): Promise<string[]> {
+    const { lastGeneratedCycle, chargeIds } = await this.createRecurringChargesFromCycles(
       tx,
       membership,
       cyclesToGenerate,
@@ -169,14 +180,14 @@ export class MembershipGenerationService {
         nextPointer,
       );
     }
-    return count;
+    return chargeIds;
   }
 
   private async processSinglePaymentGeneration(
     tx: Prisma.TransactionClient,
     membership: PlayerMembershipWithRelations,
     allCycles: SimulatedCycle[],
-  ) {
+  ): Promise<string | null> {
     if (membership.isMigrated) {
       await this.membershipRepo.updateNextGenerationPointer(
         tx,
@@ -212,7 +223,7 @@ export class MembershipGenerationService {
         singlePaymentDiscountPercent,
       );
       if (singlePayment.hasSinglePaymentAmount) {
-        await tx.charge.create({
+        const charge = await tx.charge.create({
           data: MembershipChargeFactory.buildSeasonChargePayload(
             membership.id,
             singlePayment.baseAmount,
@@ -224,6 +235,7 @@ export class MembershipGenerationService {
             extractDiscountReason(singlePayment.appliedDiscounts),
           ),
         });
+        return charge.id;
       }
     }
     return null;
@@ -236,8 +248,9 @@ export class MembershipGenerationService {
     generationDate: Date,
     evaluationDate: Date,
     existingChargesSet: Set<string>,
-  ): Promise<Date | null> {
+  ): Promise<{ nextPointer: Date | null; chargeIds: string[] }> {
     let nextPointer: Date | null = generationDate;
+    const chargeIds: string[] = [];
 
     const ungeneratedCycles = allCycles.filter(
       (cycle) => !this.isCycleGenerated(cycle, existingChargesSet, membership),
@@ -264,11 +277,11 @@ export class MembershipGenerationService {
           if (cycleGenDate) tempPointer = cycleGenDate;
         }
       }
-      return nextPointer;
+      return { nextPointer, chargeIds };
     }
 
     let currentIndex = ungeneratedCycles.indexOf(validStartingCycles[0]);
-    if (currentIndex === -1) return nextPointer;
+    if (currentIndex === -1) return { nextPointer, chargeIds };
 
     const advanceCycles = Math.max(
       1,
@@ -301,13 +314,15 @@ export class MembershipGenerationService {
         seasonEnd,
       );
       if (batch.cycles.length > 0) {
-        await this.createRecurringChargesFromCycles(
+        const { chargeIds: batchIds } = await this.createRecurringChargesFromCycles(
           tx,
           membership,
           batch.cycles,
           existingChargesSet,
           batch.groupDueDate,
         );
+        chargeIds.push(...batchIds);
+
         nextPointer = this.calculateNextGenerationPointer(
           membership,
           batch.lastCycleNextDueDate,
@@ -319,7 +334,7 @@ export class MembershipGenerationService {
       currentIndex += batch.cycles.length > 0 ? batch.cycles.length : 1;
     }
 
-    return nextPointer;
+    return { nextPointer, chargeIds };
   }
 
   private chunkCyclesByAdvanceConfiguration(
@@ -461,15 +476,16 @@ export class MembershipGenerationService {
     cycles: SimulatedCycle[],
     existingChargesSet?: Set<string>,
     groupDueDate?: Date,
-  ): Promise<{ lastGeneratedCycle: SimulatedCycle | null; count: number }> {
+  ): Promise<{ lastGeneratedCycle: SimulatedCycle | null; count: number; chargeIds: string[] }> {
     const billingFrequency =
       membership.teamSeason.billingConfig?.billingFrequency || 'MONTHLY';
     let lastGeneratedCycle: SimulatedCycle | null = null;
     let count = 0;
+    const chargeIds: string[] = [];
 
     for (const cycle of cycles) {
       if (cycle.netAmount >= 0) {
-        await tx.charge.create({
+        const charge = await tx.charge.create({
           data: MembershipChargeFactory.buildRecurringChargePayload(
             membership.id,
             cycle.baseAmount,
@@ -482,6 +498,7 @@ export class MembershipGenerationService {
             extractDiscountReason(cycle.appliedDiscounts),
           ),
         });
+        chargeIds.push(charge.id);
         if (existingChargesSet) {
           existingChargesSet.add(
             `${cycle.billingYear}-${cycle.billingMonth}-${billingFrequency === 'MONTHLY' ? 'NONE' : cycle.billingCycle}`,
@@ -492,7 +509,7 @@ export class MembershipGenerationService {
       count++;
     }
 
-    return { lastGeneratedCycle, count };
+    return { lastGeneratedCycle, count, chargeIds };
   }
 
   public async findNextUngeneratedCycles(

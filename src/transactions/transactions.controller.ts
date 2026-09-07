@@ -21,12 +21,13 @@ import { TransactionsService } from './transactions.service';
 import { CreateTransactionDto } from './dto/create-transaction.dto';
 import { UpdateTransactionDto } from './dto/update-transaction.dto';
 import { TransactionsPaginationDto } from './dto/pagination.dto';
+import { CreateBulkTransactionDto } from './dto/create-bulk-transaction.dto';
 import {
   ApiStandardResponse,
   ApiStandardCreatedResponse,
   ApiPaginatedResponse,
 } from '../common/decorators/api-responses.decorator';
-import { PersonsOptionsPaginationDto } from './dto/persons-options-pagination.dto';
+
 import { AuthGuard } from '@nestjs/passport';
 import { UserRoleGuard } from '../auth/guards/user-role/user-role.guard';
 import { RequirePermissions } from '../auth/decorators/permissions.decorator';
@@ -49,6 +50,18 @@ export class TransactionsController {
   @RequirePermissions('CREATE_TRANSACTIONS')
   async create(@Body() createTransactionDto: CreateTransactionDto) {
     return await this.transactionsService.create(createTransactionDto);
+  }
+
+  @Post('bulk')
+  @ApiOperation({
+    summary: 'Registrar pagos masivos (bulk) sobre múltiples cargos',
+    description:
+      'Registra el pago de múltiples cargos de manera atómica. Valida los saldos pendientes y genera los respectivos pagos y transacciones para cada cargo.',
+  })
+  @ApiStandardCreatedResponse(Object, 'Transacciones procesadas correctamente.')
+  @RequirePermissions('CREATE_TRANSACTIONS')
+  async createBulk(@Body() createBulkTransactionDto: CreateBulkTransactionDto) {
+    return await this.transactionsService.createBulk(createBulkTransactionDto);
   }
 
   @Get()
@@ -76,17 +89,7 @@ export class TransactionsController {
     return this.transactionsService.getPaymentMethods();
   }
 
-  @Get('persons-options')
-  @ApiOperation({
-    summary: 'Listar opciones de personas',
-    description: 'Retorna una lista paginada y filtrable de personas.',
-  })
-  @RequirePermissions('READ_TRANSACTIONS')
-  async getAvailablePersons(
-    @Query() paginationDto: PersonsOptionsPaginationDto,
-  ) {
-    return await this.transactionsService.getPersonsOptions(paginationDto);
-  }
+
 
   @Get(':id')
   @ApiOperation({

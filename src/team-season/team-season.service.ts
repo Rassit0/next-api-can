@@ -26,6 +26,17 @@ export const teamCategorySelect: Prisma.TeamSeasonSelect = {
     select: {
       id: true,
       name: true,
+      club: {
+        select: {
+          disciplineId: true,
+          discipline: {
+            select: {
+              id: true,
+              name: true,
+            },
+          },
+        },
+      },
     },
   },
   season: {

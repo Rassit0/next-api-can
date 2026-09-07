@@ -15,7 +15,7 @@ import { AccountChargesService } from './account-charges.service';
 import { CreateAccountChargeDto } from './dto/create-account-charge.dto';
 import { UpdateAccountChargeDto } from './dto/update-account-charge.dto';
 import { AccountChargesPaginationDto } from './dto/pagination.dto';
-import { PersonsOptionsPaginationDto } from './dto/persons-options-pagination.dto';
+
 import { UserRoleGuard } from 'src/auth/guards/user-role/user-role.guard';
 import { RequirePermissions } from 'src/auth/decorators/permissions.decorator';
 import { ApiBearerAuth, ApiTags, ApiOperation, ApiParam } from '@nestjs/swagger';
@@ -46,17 +46,7 @@ export class AccountChargesController {
     return this.accountChargesService.findAll(paginationDto);
   }
 
-  @Get('person-options')
-  @ApiOperation({
-    summary: 'Listar opciones de personas (Beneficiarios)',
-    description: 'Retorna una lista paginada y filtrable de personas que pueden ser beneficiarias (estudiantes o jugadores).',
-  })
-  @RequirePermissions('CREATE_ACCOUNT_CHARGES')
-  async getPersonsOptions(
-    @Query() paginationDto: PersonsOptionsPaginationDto,
-  ) {
-    return await this.accountChargesService.getPersonsOptions(paginationDto);
-  }
+
 
 
 

@@ -1,12 +1,15 @@
 import {
   Controller,
   Get,
+  Post,
+  Body,
   Param,
   ParseUUIDPipe,
   Res,
   UseGuards,
 } from '@nestjs/common';
 import { PaymentReportService } from './payment-report.service';
+import { GetBulkPaymentReportDto } from './dto/get-bulk-payment-report.dto';
 import { PrinterService } from 'src/printer/printer.service';
 import { PrismaService } from 'src/prisma.service';
 import { Response } from 'express';
@@ -64,6 +67,22 @@ export class PaymentReportController {
 
     response.setHeader('Content-Type', 'application/pdf');
     pdfDoc.info.Title = 'Payment-Report-Single';
+    pdfDoc.pipe(response);
+    pdfDoc.end();
+  }
+
+  @Post('bulk')
+  @ApiOperation({ summary: 'Generar recibo consolidado de múltiples pagos', description: 'Genera un PDF multipágina agrupando los recibos especificados y agregando un resumen final.' })
+  @ApiProduces('application/pdf')
+  @RequirePermissions('READ_TRANSACTIONS', 'CREATE_TRANSACTIONS')
+  async getBulkPaymentReport(
+    @Res() response: Response,
+    @Body() dto: GetBulkPaymentReportDto,
+  ) {
+    const pdfDoc = await this.paymentReportService.getBulkPaymentReport(dto.paymentIds || []);
+
+    response.setHeader('Content-Type', 'application/pdf');
+    pdfDoc.info.Title = 'Consolidated-Payment-Report';
     pdfDoc.pipe(response);
     pdfDoc.end();
   }

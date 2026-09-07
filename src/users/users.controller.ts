@@ -54,20 +54,6 @@ export class UsersController {
     return await this.usersService.create(createUserDto, req.user);
   }
 
-  @Get('persons/options')
-  @ApiOperation({
-    summary: 'Obtener lista de opciones de personas para select/autocomplete',
-  })
-  // It checks either CREATE or UPDATE at controller level. Or we can just use an OR guard.
-  // We'll use one and check inside, or just require a basic one. Usually CREATE or UPDATE.
-  @RequirePermissions('CREATE_USERS')
-  async getPersonOptions(
-    @Query('search') search?: string,
-    @Query('page') page = 1,
-    @Query('limit') limit = 20,
-  ) {
-    return await this.usersService.getPersonOptions(search, page, limit);
-  }
 
   @Get()
   @ApiOperation({

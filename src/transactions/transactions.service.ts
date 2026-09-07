@@ -9,15 +9,17 @@ import { UpdateTransactionDto } from './dto/update-transaction.dto';
 import { PrismaService } from 'src/prisma.service';
 import { TransactionsPaginationDto } from './dto/pagination.dto';
 import { createPaginationResult } from 'src/common/helpers/pagination.helper';
+import { CreateBulkTransactionDto } from './dto/create-bulk-transaction.dto';
 import {
   Prisma,
   StatusCharge,
   CycleEnrollmentStatus,
   PaymentMethod,
+  TransactionType,
 } from 'src/generated/prisma/client';
 import { PaymentStrategyFactory } from './strategies/payment-strategy.factory';
 import { ReceiptResolverService } from 'src/payments/receipt-resolver.service';
-import { PersonsOptionsPaginationDto } from './dto/persons-options-pagination.dto';
+
 import { TransactionsMapper } from './transactions.mapper';
 import { FinancialAccountsService } from 'src/financial-accounts/financial-accounts.service';
 import { syncCycleEnrollmentStatus } from 'src/common/helpers/sync-cycle-enrollment.helper';
@@ -47,6 +49,7 @@ export const transactionSelect = {
       id: true,
       name: true,
       lastName: true,
+      secondLastName: true,
       documentNumber: true,
     },
   },
@@ -72,6 +75,7 @@ export const transactionSelect = {
                   id: true,
                   name: true,
                   lastName: true,
+                  secondLastName: true,
                   documentNumber: true,
                 },
               },
@@ -88,6 +92,7 @@ export const transactionSelect = {
                           id: true,
                           name: true,
                           lastName: true,
+                          secondLastName: true,
                           documentNumber: true,
                         },
                       },
@@ -108,6 +113,7 @@ export const transactionSelect = {
                           id: true,
                           name: true,
                           lastName: true,
+                          secondLastName: true,
                           documentNumber: true,
                         },
                       },
@@ -149,6 +155,119 @@ export class TransactionsService {
     private readonly financialAccountsService: FinancialAccountsService,
     private readonly receiptResolver: ReceiptResolverService,
   ) {}
+
+  async createBulk(
+    createBulkDto: CreateBulkTransactionDto,
+    tx?: Prisma.TransactionClient,
+  ) {
+    if (!createBulkDto.charges || createBulkDto.charges.length === 0) {
+      throw new BadRequestException(
+        'Debe proveer al menos un cargo para procesar.',
+      );
+    }
+
+    const uniqueChargeIds = new Set(
+      createBulkDto.charges.map((c) => c.chargeId),
+    );
+    if (uniqueChargeIds.size !== createBulkDto.charges.length) {
+      throw new BadRequestException(
+        'La lista de cargos contiene elementos duplicados.',
+      );
+    }
+
+    const execute = async (prisma: Prisma.TransactionClient) => {
+      const results = [];
+      let totalCalculated = 0;
+
+      // Ordenar IDs para prevenir deadlocks en Postgres al hacer el row lock
+      const sortedChargeIds = [...createBulkDto.charges]
+        .map((c) => c.chargeId)
+        .sort();
+
+      for (const chargeId of sortedChargeIds) {
+        const lockedCharge = await lockChargeForUpdate(prisma, chargeId);
+
+        if (lockedCharge.status === StatusCharge.CANCELLED) {
+          throw new BadRequestException(
+            `El cargo con ID ${chargeId} se encuentra cancelado.`,
+          );
+        }
+
+        const currentPending = Number(
+          lockedCharge.pendingAmount.toNumber().toFixed(2),
+        );
+
+        if (currentPending <= 0) {
+          throw new BadRequestException(
+            `El cargo con ID ${chargeId} ya se encuentra pagado.`,
+          );
+        }
+
+        totalCalculated += currentPending;
+      }
+
+      totalCalculated = Number(totalCalculated.toFixed(2));
+      if (createBulkDto.totalAmount !== undefined) {
+        const declaredTotal = Number(createBulkDto.totalAmount.toFixed(2));
+        if (totalCalculated !== declaredTotal) {
+          throw new BadRequestException(
+            `El monto total declarado (${declaredTotal}) no coincide con la suma de los saldos pendientes de los cargos seleccionados (${totalCalculated}). Es posible que los saldos hayan cambiado.`,
+          );
+        }
+      }
+
+      for (const item of createBulkDto.charges) {
+        const chargeState = await prisma.charge.findUnique({
+          where: { id: item.chargeId },
+        });
+        const amountToPay = Number(
+          chargeState.pendingAmount.toNumber().toFixed(2),
+        );
+
+        const createTxDto: CreateTransactionDto = {
+          amount: amountToPay,
+          chargeId: item.chargeId,
+          type: TransactionType.INCOME,
+          payerPersonId: createBulkDto.payerPersonId,
+          reference: createBulkDto.reference,
+          notes: createBulkDto.notes,
+          transactionDate: createBulkDto.transactionDate,
+        };
+
+        if (item.splitTransactions && item.splitTransactions.length > 0) {
+          createTxDto.splitTransactions = item.splitTransactions;
+        } else {
+          createTxDto.paymentMethod = createBulkDto.paymentMethod;
+          createTxDto.financialAccountId = createBulkDto.financialAccountId;
+
+          if (!createTxDto.paymentMethod || !createTxDto.financialAccountId) {
+            throw new BadRequestException(
+              `Falta la distribución de pago para el cargo ${item.chargeId} y no se proveyó una configuración global por defecto.`,
+            );
+          }
+        }
+
+        // Reutilizamos la lógica completa de creación individual
+        // pasando explícitamente el mismo cliente transaccional de Prisma
+        const result = await this.create(createTxDto, prisma);
+        results.push(result);
+      }
+
+      return {
+        message: 'Operación bulk ejecutada correctamente',
+        transactionsCount: results.length,
+        totalAmount: totalCalculated,
+        receiptIds: results
+          .map((r) => r.data?.transaction?.paymentId)
+          .filter((id): id is string => typeof id === 'string'),
+        details: results,
+      };
+    };
+
+    return tx
+      ? await execute(tx)
+      : await this.prisma.$transaction(execute, { timeout: 20000 });
+  }
 
   async create(
     createTransactionDto: CreateTransactionDto,
@@ -216,7 +335,8 @@ export class TransactionsService {
     const uniqueAccountIds = [
       ...new Set(transactionsToProcess.map((t) => t.financialAccountId)),
     ];
-    const accounts = await this.prisma.financialAccount.findMany({
+    const prismaClient = tx || this.prisma;
+    const accounts = await prismaClient.financialAccount.findMany({
       where: { id: { in: uniqueAccountIds } },
       select: { id: true, name: true, allowedPaymentMethods: true },
     });
@@ -271,29 +391,33 @@ export class TransactionsService {
 
         charge = await prisma.charge.findUnique({
           where: { id: mainChargeId },
-          include: { 
+          include: {
             membershipCharges: {
               include: {
                 playerMembership: {
-                  include: { player: true }
-                }
-              }
-            }, 
+                  include: { player: true },
+                },
+              },
+            },
             studentCharges: {
               include: {
                 studentMembership: {
-                  include: { student: true }
-                }
-              }
-            } 
+                  include: { student: true },
+                },
+              },
+            },
           },
         });
 
         if (charge) {
           charge.amount = new Prisma.Decimal(lockedCharge.amount.toString());
-          charge.pendingAmount = new Prisma.Decimal(lockedCharge.pendingAmount.toString());
+          charge.pendingAmount = new Prisma.Decimal(
+            lockedCharge.pendingAmount.toString(),
+          );
           charge.status = lockedCharge.status;
-          charge.adjustmentAmount = lockedCharge.adjustmentAmount ? new Prisma.Decimal(lockedCharge.adjustmentAmount.toString()) : null;
+          charge.adjustmentAmount = lockedCharge.adjustmentAmount
+            ? new Prisma.Decimal(lockedCharge.adjustmentAmount.toString())
+            : null;
         }
 
         if (!charge)
@@ -323,7 +447,8 @@ export class TransactionsService {
           );
         }
 
-        const resolvedReceipt = await this.receiptResolver.resolveReceiptForCharge(charge.id, prisma);
+        const resolvedReceipt =
+          await this.receiptResolver.resolveReceiptForCharge(charge.id, prisma);
         paymentSeries = resolvedReceipt.receiptSeries;
         paymentSequenceNumber = resolvedReceipt.receiptNumber;
 
@@ -349,9 +474,13 @@ export class TransactionsService {
 
       if (isPayment && charge) {
         if (charge.studentCharges?.length > 0) {
-          resolvedPayerPersonId = charge.studentCharges[0].studentMembership?.student?.personId || resolvedPayerPersonId;
+          resolvedPayerPersonId =
+            charge.studentCharges[0].studentMembership?.student?.personId ||
+            resolvedPayerPersonId;
         } else if (charge.membershipCharges?.length > 0) {
-          resolvedPayerPersonId = charge.membershipCharges[0].playerMembership?.player?.personId || resolvedPayerPersonId;
+          resolvedPayerPersonId =
+            charge.membershipCharges[0].playerMembership?.player?.personId ||
+            resolvedPayerPersonId;
         }
       }
 
@@ -363,7 +492,10 @@ export class TransactionsService {
           txSeries = 'EGR';
         }
 
-        const nextFinNum = await this.receiptResolver.nextReceiptNumber(txSeries, prisma);
+        const nextFinNum = await this.receiptResolver.nextReceiptNumber(
+          txSeries,
+          prisma,
+        );
 
         const transaction = await prisma.transaction.create({
           data: {
@@ -401,7 +533,9 @@ export class TransactionsService {
         const applied = Number(totalPaymentAmount.toFixed(2));
         const newPendingAmount = Number((currentPending - applied).toFixed(2));
         const chargeAmount = Number(charge.amount.toNumber().toFixed(2));
-        const adjustmentAmount = Number(charge.adjustmentAmount?.toNumber() || 0);
+        const adjustmentAmount = Number(
+          charge.adjustmentAmount?.toNumber() || 0,
+        );
         const expectedTotal = chargeAmount + adjustmentAmount;
 
         let newStatus = charge.status;
@@ -479,12 +613,12 @@ export class TransactionsService {
           isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
         });
 
-
-
     return {
       message: 'Transacción registrada con éxito',
       data: {
-        transaction: TransactionsMapper.toDomain(createdTransaction.transaction as any),
+        transaction: TransactionsMapper.toDomain(
+          createdTransaction.transaction as any,
+        ),
         paymentData: processedTransactions
           .map((pt) => pt.providerResponse)
           .filter(Boolean), // Datos del QR si aplica
@@ -517,7 +651,9 @@ export class TransactionsService {
       ...(payerPersonId && { payerPersonId }),
       ...(type && { type }),
       ...(paymentMethods?.length && { paymentMethod: { in: paymentMethods } }),
-      ...(financialAccountIds?.length && { financialAccountId: { in: financialAccountIds } }),
+      ...(financialAccountIds?.length && {
+        financialAccountId: { in: financialAccountIds },
+      }),
       ...(createdById && { createdById }),
       ...((startDate || endDate) && {
         transactionDate: {
@@ -544,10 +680,41 @@ export class TransactionsService {
         payment: { charge: { sessionBooking: { isNot: null } } },
       }),
       ...(search && {
-        OR: [
-          { description: { contains: search, mode: 'insensitive' } },
-          { reference: { contains: search, mode: 'insensitive' } },
-        ],
+        AND: search.trim().split(/\s+/).filter(Boolean).map(word => {
+          const isNumeric = !isNaN(Number(word));
+          // Verificar si tiene formato de recibo (ej: ESC-MAT-7 o GEN-0007)
+          const receiptMatch = word.match(/^(.*?)-(\d+)$/);
+
+          const orConditions: Prisma.TransactionWhereInput[] = [
+            { description: { contains: word, mode: 'insensitive' } },
+            { reference: { contains: word, mode: 'insensitive' } },
+            { receiptSeries: { contains: word, mode: 'insensitive' } },
+            { payment: { receiptSeries: { contains: word, mode: 'insensitive' } } },
+            { payerPerson: { name: { contains: word, mode: 'insensitive' } } },
+            { payerPerson: { lastName: { contains: word, mode: 'insensitive' } } },
+            { payerPerson: { secondLastName: { contains: word, mode: 'insensitive' } } },
+          ];
+
+          if (isNumeric) {
+            orConditions.push({ receiptNumber: { equals: parseInt(word, 10) } });
+            orConditions.push({ payment: { receiptNumber: { equals: parseInt(word, 10) } } });
+          }
+
+          if (receiptMatch) {
+            orConditions.push({
+              receiptSeries: { contains: receiptMatch[1], mode: 'insensitive' },
+              receiptNumber: { equals: parseInt(receiptMatch[2], 10) },
+            });
+            orConditions.push({
+              payment: {
+                receiptSeries: { contains: receiptMatch[1], mode: 'insensitive' },
+                receiptNumber: { equals: parseInt(receiptMatch[2], 10) },
+              }
+            });
+          }
+
+          return { OR: orConditions };
+        })
       }),
     };
 
@@ -558,7 +725,7 @@ export class TransactionsService {
         take: per_page,
         orderBy: [
           { [sortField || 'transactionDate']: orderBy || 'desc' },
-          { createdAt: 'desc' }
+          { createdAt: 'desc' },
         ],
         select: transactionSelect,
       }),
@@ -638,24 +805,33 @@ export class TransactionsService {
         // El Charge debe bloquearse antes de leer/calcular pendingAmount.
         // Payments, reversos y Late Fees realizan Read-Modify-Write sobre
         // este mismo saldo. El lock evita Lost Updates bajo concurrencia.
-        const lockedCharge = await lockChargeForUpdate(prisma, transaction.payment.chargeId);
+        const lockedCharge = await lockChargeForUpdate(
+          prisma,
+          transaction.payment.chargeId,
+        );
 
         const charge = await prisma.charge.findUnique({
           where: { id: transaction.payment.chargeId },
         });
         if (charge) {
           charge.amount = new Prisma.Decimal(lockedCharge.amount.toString());
-          charge.pendingAmount = new Prisma.Decimal(lockedCharge.pendingAmount.toString());
+          charge.pendingAmount = new Prisma.Decimal(
+            lockedCharge.pendingAmount.toString(),
+          );
           charge.status = lockedCharge.status;
-          charge.adjustmentAmount = lockedCharge.adjustmentAmount ? new Prisma.Decimal(lockedCharge.adjustmentAmount.toString()) : null;
+          charge.adjustmentAmount = lockedCharge.adjustmentAmount
+            ? new Prisma.Decimal(lockedCharge.adjustmentAmount.toString())
+            : null;
 
           const currentPending = Number(
             charge.pendingAmount.toNumber().toFixed(2),
           );
           const applied = Number(transaction.amount.toNumber().toFixed(2));
           const chargeAmount = Number(charge.amount.toNumber().toFixed(2));
-          const adjustmentAmount = Number(charge.adjustmentAmount?.toNumber() || 0);
-  
+          const adjustmentAmount = Number(
+            charge.adjustmentAmount?.toNumber() || 0,
+          );
+
           const expectedTotal = chargeAmount + adjustmentAmount;
 
           const newPendingAmount = Number(
@@ -729,76 +905,7 @@ export class TransactionsService {
     });
   }
 
-  async getPersonsOptions(paginationDto: PersonsOptionsPaginationDto) {
-    const {
-      per_page = 10,
-      page = 1,
-      search,
-      orderBy = 'asc',
-      gender,
-    } = paginationDto;
-    const skip = (page - 1) * per_page;
 
-    const searchTerms = search ? search.trim().split(/\s+/) : [];
-
-    const where: Prisma.PersonWhereInput = {
-      ...(searchTerms.length > 0
-        ? {
-            AND: searchTerms.map((term) => ({
-              OR: [
-                { name: { contains: term, mode: 'insensitive' } },
-                { lastName: { contains: term, mode: 'insensitive' } },
-                { secondLastName: { contains: term, mode: 'insensitive' } },
-                { documentNumber: { contains: term, mode: 'insensitive' } },
-              ],
-            })),
-          }
-        : {}),
-      ...(gender && { gender }),
-    };
-
-    const [persons, totalItems] = await Promise.all([
-      this.prisma.person.findMany({
-        where,
-        take: per_page,
-        skip,
-        orderBy: { name: orderBy },
-        select: {
-          id: true,
-          name: true,
-          lastName: true,
-          secondLastName: true,
-          documentNumber: true,
-          gender: true,
-          birthDate: true,
-          imageUrl: true,
-        },
-      }),
-      this.prisma.person.count({ where }),
-    ]);
-
-    const totalPages = Math.ceil(totalItems / per_page);
-    const currentPage = totalItems === 0 ? 0 : page;
-
-    return {
-      message: 'Miembros obtenidos exitosamente',
-      data: persons.map((person) => ({
-        ...person,
-        fullName:
-          `${person.name} ${person.lastName} ${person.secondLastName || ''}`.trim(),
-      })),
-      meta: {
-        totalItems,
-        itemsPerPage: per_page,
-        totalPages,
-        currentPage,
-        hasNextPage: page < totalPages,
-        hasPrevPage: page > 1,
-        nextPage: page < totalPages ? page + 1 : null,
-        prevPage: page > 1 ? page - 1 : null,
-      },
-    };
-  }
 
   getPaymentMethods() {
     return {

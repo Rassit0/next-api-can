@@ -15,7 +15,7 @@ import {
 import { createPaginationResult } from 'src/common/helpers/pagination.helper';
 import { TransactionsService } from 'src/transactions/transactions.service';
 import { AccountChargesPaginationDto } from './dto/pagination.dto';
-import { PersonsOptionsPaginationDto } from './dto/persons-options-pagination.dto';
+
 
 @Injectable()
 export class AccountChargesService {
@@ -275,74 +275,5 @@ export class AccountChargesService {
     return { message: 'Cuenta cancelada lógicamente (Estado: CANCELLED)' };
   }
 
-  async getPersonsOptions(paginationDto: PersonsOptionsPaginationDto) {
-    const {
-      per_page = 10,
-      page = 1,
-      search,
-      orderBy = 'asc',
-      gender,
-    } = paginationDto;
-    const skip = (page - 1) * per_page;
 
-    const searchTerms = search ? search.trim().split(/\s+/) : [];
-
-    const where: Prisma.PersonWhereInput = {
-      ...(searchTerms.length > 0
-        ? {
-            AND: searchTerms.map((term) => ({
-              OR: [
-                { name: { contains: term, mode: 'insensitive' } },
-                { lastName: { contains: term, mode: 'insensitive' } },
-                { secondLastName: { contains: term, mode: 'insensitive' } },
-                { documentNumber: { contains: term, mode: 'insensitive' } },
-              ],
-            })),
-          }
-        : {}),
-      ...(gender && { gender }),
-    };
-
-    const [persons, totalItems] = await Promise.all([
-      this.prisma.person.findMany({
-        where,
-        take: per_page,
-        skip,
-        orderBy: [{ name: orderBy }, { id: 'asc' }],
-        select: {
-          id: true,
-          name: true,
-          lastName: true,
-          secondLastName: true,
-          documentNumber: true,
-          gender: true,
-          birthDate: true,
-          imageUrl: true,
-        },
-      }),
-      this.prisma.person.count({ where }),
-    ]);
-
-    const totalPages = Math.ceil(totalItems / per_page);
-    const currentPage = totalItems === 0 ? 0 : page;
-
-    return {
-      message: 'Personas obtenidas exitosamente',
-      data: persons.map((person) => ({
-        ...person,
-        fullName:
-          `${person.name} ${person.lastName} ${person.secondLastName || ''}`.trim(),
-      })),
-      meta: {
-        totalItems,
-        itemsPerPage: per_page,
-        totalPages,
-        currentPage,
-        hasNextPage: page < totalPages,
-        hasPrevPage: page > 1,
-        nextPage: page < totalPages ? page + 1 : null,
-        prevPage: page > 1 ? page - 1 : null,
-      },
-    };
-  }
 }

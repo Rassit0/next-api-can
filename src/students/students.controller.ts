@@ -74,16 +74,6 @@ export class StudentsController {
     return await this.studentsService.findAll(paginationDto);
   }
 
-  @Get('available-persons-options')
-  @ApiOperation({
-    summary: 'Listar opciones de personas disponibles',
-    description:
-      'Retorna una lista paginada de personas que aún no son estudiantes.',
-  })
-  @RequirePermissions('READ_STUDENTS')
-  async getAvailablePersons(@Query() paginationDto: PaginationDto) {
-    return await this.studentsService.getAvailablePersons(paginationDto);
-  }
 
   @Get(':id')
   @ApiOperation({

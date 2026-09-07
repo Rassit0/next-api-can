@@ -13,4 +13,7 @@ export interface TransactionReceiptData {
   receiverDocument: string;
   validationUrl: string;
   type: 'INCOME' | 'EXPENSE';
+  isPartialPayment?: boolean;
+  beneficiaryId?: string;
+  payerId?: string;
 }

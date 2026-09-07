@@ -149,7 +149,7 @@ export class CreateTransactionDto {
       constraint1: 'paymentMethod',
     }),
   })
-  paymentMethod: PaymentMethod;
+  paymentMethod?: PaymentMethod;
 
   @ApiPropertyOptional({
     example: '123456789',
@@ -227,5 +227,5 @@ export class CreateTransactionDto {
       constraint1: 'financialAccount',
     }),
   })
-  financialAccountId: string;
+  financialAccountId?: string;
 }

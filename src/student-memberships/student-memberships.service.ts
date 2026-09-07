@@ -187,7 +187,10 @@ export class StudentMembershipsService {
 
     const [student, offeringData] = await Promise.all([
       this.getStudent(createDto.studentId),
-      this.getCourseMembershipOfferingAndShift(createDto.courseSeasonId, createDto.courseSeasonShiftId),
+      this.getCourseMembershipOfferingAndShift(
+        createDto.courseSeasonId,
+        createDto.courseSeasonShiftId,
+      ),
     ]);
     const offering = offeringData.courseSeason;
     const shift = offeringData.shift;
@@ -225,60 +228,64 @@ export class StudentMembershipsService {
       ...createData
     } = createDto;
 
-    return await this.prisma.$transaction(async (tx) => {
-      // Adquirir lock pesimista sobre CourseSeason tempranamente para serializar 
-      // la concurrencia y evitar FK deadlocks al insertar StudentMembership.
-      await tx.$queryRaw`
+    return await this.prisma.$transaction(
+      async (tx) => {
+        // Adquirir lock pesimista sobre CourseSeason tempranamente para serializar
+        // la concurrencia y evitar FK deadlocks al insertar StudentMembership.
+        await tx.$queryRaw`
         SELECT 1 
         FROM course_seasons 
         WHERE id = ${createDto.courseSeasonId} 
         FOR UPDATE
       `;
 
-      const membership = await tx.studentMembership.create({
-        data: {
-          ...createData,
-          status: createData.status ?? StudentMembershipStatus.ACTIVE,
-          ...(studentDiscounts &&
-            studentDiscounts.length > 0 && {
-              studentDiscounts: {
-                create: studentDiscounts.map((d) => ({
-                  ...d,
-                  startDate: new Date(d.startDate),
-                  endDate: d.endDate ? new Date(d.endDate) : null,
-                })),
+        const membership = await tx.studentMembership.create({
+          data: {
+            ...createData,
+            status: createData.status ?? StudentMembershipStatus.ACTIVE,
+            ...(studentDiscounts &&
+              studentDiscounts.length > 0 && {
+                studentDiscounts: {
+                  create: studentDiscounts.map((d) => ({
+                    ...d,
+                    startDate: new Date(d.startDate),
+                    endDate: d.endDate ? new Date(d.endDate) : null,
+                  })),
+                },
+              }),
+            histories: {
+              create: {
+                previousStatus: null,
+                newStatus: createData.status ?? StudentMembershipStatus.ACTIVE,
+                reason: createData.notes ?? 'Creación de inscripción',
               },
-            }),
-          histories: {
-            create: {
-              previousStatus: null,
-              newStatus:
-                createData.status ?? StudentMembershipStatus.ACTIVE,
-              reason: createData.notes ?? 'Creación de inscripción',
             },
           },
-        },
-        select: studentMembershipSelect,
-      });
+          select: studentMembershipSelect,
+        });
 
-      // Generar cargos inmediatamente después de crear la membresía
-      await this.studentChargesService.generateChargesForNewMembership(
-        membership.id,
-        {
-          chargeRegistrationOnMigration,
-          chargeCurrentMonthOnMigration,
-          chargeRegistration,
-          chargeInitialCycle,
-          forceFullCycleFee,
-        },
-        tx,
-      );
+        // Generar cargos inmediatamente después de crear la membresía
+        const generatedChargeIds = await this.studentChargesService.generateChargesForNewMembership(
+          membership.id,
+          {
+            chargeRegistrationOnMigration,
+            chargeCurrentMonthOnMigration,
+            chargeRegistration,
+            chargeInitialCycle,
+            forceFullCycleFee,
+          },
+          tx,
+        );
 
-      return {
-        message: 'Inscripción de estudiante a curso escolar creada exitosamente',
-        data: mapMembershipWithTotal(membership),
-      };
-    }, { timeout: 15000 });
+        return {
+          message:
+            'Inscripción de estudiante a curso escolar creada exitosamente',
+          data: mapMembershipWithTotal(membership),
+          generatedChargeIds,
+        };
+      },
+      { timeout: 15000 },
+    );
   }
 
   private calculateAge(birthDate: Date, referenceDate: Date): number {
@@ -361,7 +368,7 @@ export class StudentMembershipsService {
             status: { in: ['PENDING', 'CONFIRMED'] },
             effectiveStartDate: { lte: pDate },
             cycleEndDate: { gt: pDate },
-          }
+          },
         };
       } else {
         where.courseSeasonId = courseSeasonId;
@@ -385,7 +392,7 @@ export class StudentMembershipsService {
       if (searchTerms.length > 0) {
         where.student = {
           person: {
-            AND: searchTerms.map(term => ({
+            AND: searchTerms.map((term) => ({
               OR: [
                 { name: { contains: term, mode: 'insensitive' } },
                 { lastName: { contains: term, mode: 'insensitive' } },
@@ -401,7 +408,8 @@ export class StudentMembershipsService {
     const globalWhere: Prisma.StudentMembershipWhereInput = {};
     if (studentId) globalWhere.studentId = studentId;
     if (courseSeasonId) globalWhere.courseSeasonId = courseSeasonId;
-    if (courseSeasonShiftId) globalWhere.courseSeasonShiftId = courseSeasonShiftId;
+    if (courseSeasonShiftId)
+      globalWhere.courseSeasonShiftId = courseSeasonShiftId;
     if (paymentPlanId) globalWhere.paymentPlanId = paymentPlanId;
 
     const [
@@ -456,10 +464,12 @@ export class StudentMembershipsService {
         where: { ...globalWhere, status: 'PENDING_ACTIVE' },
       }),
       courseSeasonId
-        ? this.prisma.courseSeasonShift.aggregate({
-            where: { courseSeasonId },
-            _sum: { maxMembers: true },
-          }).then(res => ({ maxMembers: res._sum.maxMembers }))
+        ? this.prisma.courseSeasonShift
+            .aggregate({
+              where: { courseSeasonId },
+              _sum: { maxMembers: true },
+            })
+            .then((res) => ({ maxMembers: res._sum.maxMembers }))
         : Promise.resolve(null),
     ]);
 
@@ -548,7 +558,10 @@ export class StudentMembershipsService {
 
     const [student, offering] = await Promise.all([
       this.getStudent(studentId),
-      this.getCourseMembershipOfferingAndShift(offeringId, updateDto.courseSeasonShiftId ?? membership.courseSeasonShiftId),
+      this.getCourseMembershipOfferingAndShift(
+        offeringId,
+        updateDto.courseSeasonShiftId ?? membership.courseSeasonShiftId,
+      ),
     ]);
 
     this.validateMembershipStartDate(
@@ -566,7 +579,10 @@ export class StudentMembershipsService {
       updateDto.courseSeasonId !== membership.courseSeasonId;
 
     if (isChangingOffering) {
-      await this.validateOfferingCapacity(offering.shift.id, offering.shift.maxMembers);
+      await this.validateOfferingCapacity(
+        offering.shift.id,
+        offering.shift.maxMembers,
+      );
       await this.validateDuplicateMembership(studentId, offeringId, id);
     }
 
@@ -797,7 +813,10 @@ export class StudentMembershipsService {
       membership.courseSeasonShiftId,
     );
 
-    await this.validateOfferingCapacity(offering.shift.id, offering.shift.maxMembers);
+    await this.validateOfferingCapacity(
+      offering.shift.id,
+      offering.shift.maxMembers,
+    );
 
     const updatedMembership = await this.prisma.studentMembership.update({
       where: { id },
@@ -911,138 +930,157 @@ export class StudentMembershipsService {
   }
 
   async transferShift(id: string, transferDto: TransferShiftDto) {
-    return await this.prisma.$transaction(async (tx) => {
-      // 1. Obtener y bloquear la membresía y sus ciclos futuros
-      const membership = await tx.studentMembership.findUnique({
-        where: { id },
-        include: {
-          courseSeason: {
-            include: { course: true }
-          },
-          courseSeasonShift: {
-            include: { shift: true }
-          },
-          cycleEnrollments: {
-            where: {
-              status: { in: ['PENDING', 'CONFIRMED'] }
+    return await this.prisma.$transaction(
+      async (tx) => {
+        // 1. Obtener y bloquear la membresía y sus ciclos futuros
+        const membership = await tx.studentMembership.findUnique({
+          where: { id },
+          include: {
+            courseSeason: {
+              include: { course: true },
             },
-            orderBy: { cycleStartDate: 'asc' }
-          }
+            courseSeasonShift: {
+              include: { shift: true },
+            },
+            cycleEnrollments: {
+              where: {
+                status: { in: ['PENDING', 'CONFIRMED'] },
+              },
+              orderBy: { cycleStartDate: 'asc' },
+            },
+          },
+        });
+
+        if (!membership) {
+          throw new NotFoundException('errors.MEMBERSHIP_NOT_FOUND');
         }
-      });
 
-      if (!membership) {
-        throw new NotFoundException('errors.MEMBERSHIP_NOT_FOUND');
-      }
-
-      if (membership.status !== StudentMembershipStatus.ACTIVE && membership.status !== StudentMembershipStatus.PENDING_ACTIVE) {
-        throw new BadRequestException('Solo las inscripciones activas pueden ser transferidas');
-      }
-
-      if (membership.courseSeasonShiftId === transferDto.targetCourseSeasonShiftId) {
-        throw new BadRequestException('El estudiante ya se encuentra en este turno');
-      }
-
-      // 2. Bloquear y validar destino
-      const targetCourseSeasonShift = await tx.courseSeasonShift.findUnique({
-        where: { id: transferDto.targetCourseSeasonShiftId },
-        include: { shift: true, courseSeason: { include: { course: true } } }
-      });
-
-      if (!targetCourseSeasonShift) {
-        throw new NotFoundException('El turno destino no fue encontrado');
-      }
-
-      const targetCourseSeason = targetCourseSeasonShift.courseSeason;
-
-      if (targetCourseSeason.status !== StatusCourseSeason.ACTIVE) {
-        throw new BadRequestException('El turno destino no está activo');
-      }
-
-      // Validar que ambos turnos pertenezcan al mismo curso (regla de negocio)
-      if (membership.courseSeason.courseId !== targetCourseSeason.courseId) {
-        throw new BadRequestException('Solo se pueden realizar transferencias entre turnos del mismo curso');
-      }
-
-      const isSameOffer = membership.courseSeasonId === transferDto.targetCourseSeasonId;
-
-      // 3. Determinar el primer ciclo transferible
-      const effectiveDate = new Date(transferDto.effectiveDate);
-      
-      const overlappingCycle = membership.cycleEnrollments.find(c => 
-        c.cycleStartDate <= effectiveDate && c.cycleEndDate > effectiveDate
-      );
-
-      let transferStartDate: Date;
-      if (overlappingCycle) {
-        // La transferencia aplica desde el inicio del próximo ciclo
-        transferStartDate = overlappingCycle.cycleEndDate;
-      } else {
-        // No hay ciclo en curso en esta fecha, aplica desde la fecha efectiva
-        transferStartDate = effectiveDate;
-      }
-
-      const cyclesToTransfer = membership.cycleEnrollments.filter(c => 
-        c.cycleStartDate >= transferStartDate
-      );
-
-      if (cyclesToTransfer.length === 0) {
-        // Si no hay ciclos futuros, de todas formas cambiamos el turno base
-        // para que las próximas facturaciones (cron) se generen en el nuevo turno.
-        this.logger.log(`No hay ciclos futuros para transferir en membresía ${id}, solo se actualizará el turno base.`);
-      } else {
-        // 4. Validar capacidad para cada ciclo a transferir
-        for (const cycle of cyclesToTransfer) {
-          await validateCourseSeasonCapacity(
-            tx,
-            transferDto.targetCourseSeasonShiftId,
-            cycle.cycleStartDate,
-            cycle.cycleEndDate,
-            cycle.id
+        if (
+          membership.status !== StudentMembershipStatus.ACTIVE &&
+          membership.status !== StudentMembershipStatus.PENDING_ACTIVE
+        ) {
+          throw new BadRequestException(
+            'Solo las inscripciones activas pueden ser transferidas',
           );
         }
 
-        // 5. Actualizar los ciclos futuros al nuevo turno
-        await tx.cycleEnrollment.updateMany({
-          where: {
-            id: { in: cyclesToTransfer.map(c => c.id) }
-          },
+        if (
+          membership.courseSeasonShiftId ===
+          transferDto.targetCourseSeasonShiftId
+        ) {
+          throw new BadRequestException(
+            'El estudiante ya se encuentra en este turno',
+          );
+        }
+
+        // 2. Bloquear y validar destino
+        const targetCourseSeasonShift = await tx.courseSeasonShift.findUnique({
+          where: { id: transferDto.targetCourseSeasonShiftId },
+          include: { shift: true, courseSeason: { include: { course: true } } },
+        });
+
+        if (!targetCourseSeasonShift) {
+          throw new NotFoundException('El turno destino no fue encontrado');
+        }
+
+        const targetCourseSeason = targetCourseSeasonShift.courseSeason;
+
+        if (targetCourseSeason.status !== StatusCourseSeason.ACTIVE) {
+          throw new BadRequestException('El turno destino no está activo');
+        }
+
+        // Validar que ambos turnos pertenezcan al mismo curso (regla de negocio)
+        if (membership.courseSeason.courseId !== targetCourseSeason.courseId) {
+          throw new BadRequestException(
+            'Solo se pueden realizar transferencias entre turnos del mismo curso',
+          );
+        }
+
+        const isSameOffer =
+          membership.courseSeasonId === transferDto.targetCourseSeasonId;
+
+        // 3. Determinar el primer ciclo transferible
+        const effectiveDate = new Date(transferDto.effectiveDate);
+
+        const overlappingCycle = membership.cycleEnrollments.find(
+          (c) =>
+            c.cycleStartDate <= effectiveDate && c.cycleEndDate > effectiveDate,
+        );
+
+        let transferStartDate: Date;
+        if (overlappingCycle) {
+          // La transferencia aplica desde el inicio del próximo ciclo
+          transferStartDate = overlappingCycle.cycleEndDate;
+        } else {
+          // No hay ciclo en curso en esta fecha, aplica desde la fecha efectiva
+          transferStartDate = effectiveDate;
+        }
+
+        const cyclesToTransfer = membership.cycleEnrollments.filter(
+          (c) => c.cycleStartDate >= transferStartDate,
+        );
+
+        if (cyclesToTransfer.length === 0) {
+          // Si no hay ciclos futuros, de todas formas cambiamos el turno base
+          // para que las próximas facturaciones (cron) se generen en el nuevo turno.
+          this.logger.log(
+            `No hay ciclos futuros para transferir en membresía ${id}, solo se actualizará el turno base.`,
+          );
+        } else {
+          // 4. Validar capacidad para cada ciclo a transferir
+          for (const cycle of cyclesToTransfer) {
+            await validateCourseSeasonCapacity(
+              tx,
+              transferDto.targetCourseSeasonShiftId,
+              cycle.cycleStartDate,
+              cycle.cycleEndDate,
+              cycle.id,
+            );
+          }
+
+          // 5. Actualizar los ciclos futuros al nuevo turno
+          await tx.cycleEnrollment.updateMany({
+            where: {
+              id: { in: cyclesToTransfer.map((c) => c.id) },
+            },
+            data: {
+              courseSeasonId: transferDto.targetCourseSeasonId,
+              courseSeasonShiftId: transferDto.targetCourseSeasonShiftId,
+            },
+          });
+        }
+
+        // 6. Actualizar el contrato base (StudentMembership)
+        const updatedMembership = await tx.studentMembership.update({
+          where: { id },
           data: {
             courseSeasonId: transferDto.targetCourseSeasonId,
-            courseSeasonShiftId: transferDto.targetCourseSeasonShiftId
-          }
+            courseSeasonShiftId: transferDto.targetCourseSeasonShiftId,
+            histories: {
+              create: {
+                previousStatus: membership.status,
+                newStatus: membership.status,
+                reason: `Transferencia de turno de ${membership.courseSeasonShift?.shift?.name || 'Origen'} a ${targetCourseSeasonShift.shift.name || 'Destino'} a partir del ${transferStartDate.toLocaleDateString()}`,
+              },
+            },
+          },
+          select: studentMembershipSelect,
         });
-      }
 
-      // 6. Actualizar el contrato base (StudentMembership)
-      const updatedMembership = await tx.studentMembership.update({
-        where: { id },
-        data: {
-          courseSeasonId: transferDto.targetCourseSeasonId,
-          courseSeasonShiftId: transferDto.targetCourseSeasonShiftId,
-          histories: {
-            create: {
-              previousStatus: membership.status,
-              newStatus: membership.status,
-              reason: `Transferencia de turno de ${membership.courseSeasonShift?.shift?.name || 'Origen'} a ${targetCourseSeasonShift.shift.name || 'Destino'} a partir del ${transferStartDate.toLocaleDateString()}`
-            }
-          }
-        },
-        select: studentMembershipSelect
-      });
-
-      return {
-        message: 'Transferencia de turno procesada exitosamente',
-        data: mapMembershipWithTotal(updatedMembership)
-      };
-    }, { timeout: 15000 });
+        return {
+          message: 'Transferencia de turno procesada exitosamente',
+          data: mapMembershipWithTotal(updatedMembership),
+        };
+      },
+      { timeout: 15000 },
+    );
   }
 
   async getMembershipHistories(id: string) {
     const membership = await this.prisma.studentMembership.findUnique({
       where: { id },
     });
-    
+
     if (!membership) {
       throw new NotFoundException('La inscripción no fue encontrada');
     }
@@ -1064,11 +1102,11 @@ export class StudentMembershipsService {
               select: {
                 name: true,
                 lastName: true,
-              }
-            }
-          }
-        }
-      }
+              },
+            },
+          },
+        },
+      },
     });
 
     return histories;
@@ -1164,7 +1202,10 @@ export class StudentMembershipsService {
     );
   }
 
-  private async getCourseMembershipOfferingAndShift(courseSeasonId: string, courseSeasonShiftId: string) {
+  private async getCourseMembershipOfferingAndShift(
+    courseSeasonId: string,
+    courseSeasonShiftId: string,
+  ) {
     const shift = await this.prisma.courseSeasonShift.findUnique({
       where: { id: courseSeasonShiftId },
       include: {
@@ -1181,9 +1222,14 @@ export class StudentMembershipsService {
       },
     });
     if (!shift || shift.courseSeasonId !== courseSeasonId) {
-      throw new NotFoundException('El turno o la temporada de curso no fue encontrada');
+      throw new NotFoundException(
+        'El turno o la temporada de curso no fue encontrada',
+      );
     }
-    return { shift: shift as unknown as CourseSeasonShiftWithEligibility, courseSeason: shift.courseSeason };
+    return {
+      shift: shift as unknown as CourseSeasonShiftWithEligibility,
+      courseSeason: shift.courseSeason,
+    };
   }
 
   private async validateOfferingCapacity(
@@ -1285,10 +1331,7 @@ export class StudentMembershipsService {
       }
     }
 
-    if (
-      shift.gender !== 'MIXED' &&
-      shift.gender !== student.person.gender
-    ) {
+    if (shift.gender !== 'MIXED' && shift.gender !== student.person.gender) {
       throw new BadRequestException(
         'El género del estudiante no coincide con el género requerido para este turno',
       );
@@ -1487,7 +1530,11 @@ export class StudentMembershipsService {
         where,
         take: per_page,
         skip,
-        orderBy: { person: { name: orderBy } },
+        orderBy: [
+          { person: { lastName: orderBy } },
+          { person: { secondLastName: orderBy } },
+          { person: { name: orderBy } },
+        ],
         select: {
           id: true,
           isActive: true,
@@ -1517,8 +1564,7 @@ export class StudentMembershipsService {
         ...student,
         person: {
           ...student.person,
-          fullName:
-            `${student.person.name} ${student.person.lastName} ${student.person.secondLastName || ''}`.trim(),
+          fullName: `${student.person.lastName || ''} ${student.person.secondLastName || ''} ${student.person.name}`.replace(/\s+/g, ' ').trim(),
         },
       })),
       meta: {

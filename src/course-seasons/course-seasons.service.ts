@@ -40,6 +40,7 @@ export const courseSeasonSelect: Prisma.CourseSeasonSelect = {
         select: {
           id: true,
           name: true,
+          disciplineId: true,
           minAge: true,
           maxAge: true,
         },
@@ -97,6 +98,7 @@ export const courseSeasonSelect: Prisma.CourseSeasonSelect = {
         select: {
           id: true,
           name: true,
+          disciplineId: true,
         },
       },
     },

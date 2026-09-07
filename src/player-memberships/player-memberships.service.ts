@@ -249,7 +249,7 @@ export class PlayerMembershipsService {
     });
 
     // Generar cargos inmediatamente después de crear la membresía
-    await this.membershipChargesService.generateChargesForNewMembership(
+    const generatedChargeIds = await this.membershipChargesService.generateChargesForNewMembership(
       membership.id,
       {
         chargeRegistrationOnMigration: createDto.chargeRegistrationOnMigration,
@@ -260,6 +260,7 @@ export class PlayerMembershipsService {
     return {
       message: 'Membresía creada exitosamente',
       data: mapMembershipWithTotal(membership),
+      generatedChargeIds,
     };
   }
 
@@ -1178,7 +1179,11 @@ export class PlayerMembershipsService {
         where,
         take: per_page,
         skip,
-        orderBy: { person: { name: orderBy } },
+        orderBy: [
+          { person: { lastName: orderBy } },
+          { person: { secondLastName: orderBy } },
+          { person: { name: orderBy } },
+        ],
         select: {
           id: true,
           isActive: true,
@@ -1208,8 +1213,7 @@ export class PlayerMembershipsService {
         ...player,
         person: {
           ...player.person,
-          fullName:
-            `${player.person.name} ${player.person.lastName} ${player.person.secondLastName || ''}`.trim(),
+          fullName: `${player.person.lastName || ''} ${player.person.secondLastName || ''} ${player.person.name}`.replace(/\s+/g, ' ').trim(),
         },
       })),
       meta: {

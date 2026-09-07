@@ -67,6 +67,15 @@ export class StudentMembershipSummaryDto {
 
   @ApiProperty()
   startedAt: Date;
+
+  @ApiPropertyOptional()
+  shiftName?: string | null;
+
+  @ApiPropertyOptional()
+  shiftStartTime?: string | null;
+
+  @ApiPropertyOptional()
+  shiftEndTime?: string | null;
 }
 
 export class PersonProfileSummaryDto {

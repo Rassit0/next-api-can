@@ -141,10 +141,10 @@ export class StudentChargesService {
       forceFullCycleFee?: boolean;
     },
     tx?: Prisma.TransactionClient,
-  ) {
+  ): Promise<string[]> {
     const membership =
       await this.membershipRepo.getMembershipById(membershipId, tx);
-    if (!membership) return;
+    if (!membership) return [];
 
     const generationMembership = {
       ...membership,
@@ -157,7 +157,7 @@ export class StudentChargesService {
     } as typeof membership;
 
     try {
-      await this.enrollmentService.enrollInitialCycle(
+      return await this.enrollmentService.enrollInitialCycle(
         membershipId,
         options,
         tx,
@@ -178,6 +178,7 @@ export class StudentChargesService {
           throw error;
         }
       }
+      return [];
     }
   }
 

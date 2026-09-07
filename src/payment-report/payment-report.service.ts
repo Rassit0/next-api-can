@@ -1,6 +1,6 @@
-import { Injectable, NotFoundException, InternalServerErrorException, Logger } from '@nestjs/common';
+import { Injectable, NotFoundException, InternalServerErrorException, Logger, BadRequestException } from '@nestjs/common';
 import { PrinterService } from 'src/printer/printer.service';
-import { transactionByIdReport } from 'src/reports';
+import { transactionByIdReport, bulkPaymentReport, consolidatedReceiptReport } from 'src/reports';
 import { convertAmountToWords } from 'src/helpers/numbers-to-words.helper';
 import { PrismaService } from 'src/prisma.service';
 import { I18nService, I18nContext } from 'nestjs-i18n';
@@ -16,7 +16,7 @@ export class PaymentReportService {
     private readonly i18n: I18nService,
   ) {}
 
-  async getPaymentByIdReport(paymentId: string, isSingle: boolean = false) {
+  async buildPaymentReceiptData(paymentId: string) {
     const payment = await this.prisma.payment.findUnique({
       where: { id: paymentId },
       include: {
@@ -43,6 +43,7 @@ export class PaymentReportService {
                 },
               },
             },
+            accountCharge: true,
           },
         },
       },
@@ -82,6 +83,7 @@ export class PaymentReportService {
     const payerDocument = firstTx?.payerPerson
       ? firstTx.payerPerson.documentNumber
       : 'S/N';
+    const payerId = firstTx?.payerPerson?.id;
 
     const receiverPerson = payment.createdBy?.person;
     const receiverName = receiverPerson
@@ -92,13 +94,18 @@ export class PaymentReportService {
       : 'S/N';
 
     let beneficiaryName: string | undefined;
+    let beneficiaryId: string | undefined;
     const charge = payment.charge;
     if (charge?.membershipCharges && charge.membershipCharges.length > 0) {
       const person = charge.membershipCharges[0].playerMembership.player.person;
       beneficiaryName = `${person.name} ${person.lastName} ${person.secondLastName || ''}`.trim();
+      beneficiaryId = person.id;
     } else if (charge?.studentCharges && charge.studentCharges.length > 0) {
       const person = charge.studentCharges[0].studentMembership.student.person;
       beneficiaryName = `${person.name} ${person.lastName} ${person.secondLastName || ''}`.trim();
+      beneficiaryId = person.id;
+    } else if (charge?.accountCharge?.personId) {
+      beneficiaryId = charge.accountCharge.personId;
     }
 
     const lang = I18nContext.current()?.lang || 'es';
@@ -112,9 +119,20 @@ export class PaymentReportService {
        };
     });
 
-    const paymentMethodString = distributions.map(d => `${d.paymentMethod}: ${d.amount} Bs.`).join('\n');
+    const isPartialPayment = charge ? numericAmount < charge.amount.toNumber() : false;
 
-    const data = {
+    const getCategoryName = (category?: string) => {
+      switch (category) {
+        case 'REGISTRATION': return 'Matrícula';
+        case 'LATE_FEE': return 'Mora / Recargo';
+        case 'NORMAL': return 'Mensualidad / Cuota';
+        default: return 'Cargo';
+      }
+    };
+
+    const paymentMethodString = distributions.map(d => `${d.paymentMethod} - ${d.financialAccountName}: ${d.amount} Bs.`).join('\n');
+
+    return {
       receiptSeries: payment.receiptSeries,
       receiptNumber,
       date: payment.paymentDate,
@@ -123,15 +141,66 @@ export class PaymentReportService {
       beneficiaryName,
       amountLiteral,
       amountNumeric: numericAmount.toFixed(2),
-      concept: firstTx?.description || 'Sin concepto',
+      concept: charge?.description || firstTx?.description || (charge?.chargeCategory ? getCategoryName(charge.chargeCategory) : 'Sin concepto'),
       paymentMethod: paymentMethodString,
       receiverName,
       receiverDocument,
       validationUrl: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/verify/payment/${payment.id}`,
       type: firstTx?.type || 'INCOME',
+      isPartialPayment,
+      beneficiaryId,
+      payerId,
     };
+  }
 
-    const docDefinition = transactionByIdReport({ data: data as any, isSingle });
+  async getPaymentByIdReport(paymentId: string, isSingle: boolean = false) {
+    const data = await this.buildPaymentReceiptData(paymentId);
+
+    // -- ANTIGUO CODIGO INDIVIDUAL (Conservado por solicitud) --
+    // const docDefinition = transactionByIdReport({ data: data as any, isSingle });
+    // -----------------------------------------------------------
+
+    // Ahora utilizamos el formato de multiples pagos (consolidado) para recibos individuales
+    const docDefinition = consolidatedReceiptReport({ data: [data] as any });
+    const doc = this.printerService.createPdf(docDefinition);
+    return doc;
+  }
+
+  async getBulkPaymentReport(paymentIds: string[]) {
+    // 1. Eliminar duplicados
+    const uniqueIds = Array.from(new Set(paymentIds));
+
+    if (uniqueIds.length === 0) {
+      throw new BadRequestException('Debe proveer al menos un ID de pago.');
+    }
+
+    // Si solo hay un pago seleccionado, es mejor imprimir el recibo individual
+    if (uniqueIds.length === 1) {
+      return this.getPaymentByIdReport(uniqueIds[0], false);
+    }
+
+    // 2. Obtener datos de cada recibo de forma secuencial (o Promise.all)
+    // Usamos Promise.all porque getReceiptData ya lanza NotFoundException
+    // si un ID no existe, cumpliendo con la regla de fallar rápido.
+    const receiptsData = await Promise.all(
+      uniqueIds.map(id => this.buildPaymentReceiptData(id))
+    );
+
+    // 3. Validar que todos los recibos pertenezcan al mismo pagador
+    const payerIds = new Set(
+      receiptsData
+        .map((receipt) => receipt.payerId)
+        .filter(Boolean),
+    );
+
+    if (payerIds.size > 1) {
+      throw new BadRequestException(
+        'Todos los recibos seleccionados deben pertenecer al mismo pagador.',
+      );
+    }
+
+    // Invocar el nuevo template consolidated-receipt.report
+    const docDefinition = consolidatedReceiptReport({ data: receiptsData as any });
     const doc = this.printerService.createPdf(docDefinition);
     return doc;
   }
@@ -201,8 +270,18 @@ export class PaymentReportService {
          paymentMethod: translatedPaymentMethod,
          financialAccountName: transaction.financialAccount?.name || 'Cuenta',
     }];
-    
-    const paymentMethodString = distributions.map(d => `${d.paymentMethod}: ${d.amount} Bs.`).join('\n');
+
+    const getCategoryName = (category?: string) => {
+      switch (category) {
+        case 'REGISTRATION': return 'Matrícula';
+        case 'LATE_FEE': return 'Mora / Recargo';
+        case 'NORMAL': return 'Mensualidad / Cuota';
+        default: return 'Cargo';
+      }
+    };
+
+    const charge = transaction.payment?.charge;
+    const paymentMethodString = distributions.map(d => `${d.paymentMethod} - ${d.financialAccountName}: ${d.amount} Bs.`).join('\n');
 
     const data = {
       receiptSeries: transaction.payment?.receiptSeries || transaction.receiptSeries,
@@ -213,7 +292,7 @@ export class PaymentReportService {
       beneficiaryName,
       amountLiteral,
       amountNumeric: numericAmount.toFixed(2),
-      concept: transaction.description || 'Sin concepto',
+      concept: charge?.description || transaction.description || (charge?.chargeCategory ? getCategoryName(charge.chargeCategory) : 'Sin concepto'),
       paymentMethod: paymentMethodString,
       receiverName,
       receiverDocument,

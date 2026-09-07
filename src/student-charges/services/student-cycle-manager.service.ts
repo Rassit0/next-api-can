@@ -43,8 +43,9 @@ export class StudentCycleManagerService {
     enrollmentDate: Date,
     options: EnrollmentFinancialOptions,
     tx: Prisma.TransactionClient,
-  ): Promise<{ generatedCount: number }> {
+  ): Promise<{ generatedCount: number; generatedChargeIds: string[] }> {
     let generatedCount = 0;
+    const generatedChargeIds: string[] = [];
     const seasonEndDate = membership.courseSeason.season.endDate;
 
     const allPauses = [
@@ -180,6 +181,7 @@ export class StudentCycleManagerService {
             dueDate: DateUtils.getEndOfUTCDay(currentCycle.cycleStartDate),
           },
         });
+        generatedChargeIds.push(cycleCharge.id);
       }
 
       const cycleStatus =
@@ -221,6 +223,6 @@ export class StudentCycleManagerService {
       generatedCount++;
     }
 
-    return { generatedCount };
+    return { generatedCount, generatedChargeIds };
   }
 }

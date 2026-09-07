@@ -6,11 +6,16 @@ interface HeaderOptions {
   receiptNumber: string;
   date: Date;
   type?: 'INCOME' | 'EXPENSE';
+  isPartialPayment?: boolean;
 }
 
 export const headerSection = (options: HeaderOptions): Content => {
-  const { receiptSeries, receiptNumber, date, type } = options;
-  const title = type === 'EXPENSE' ? 'COMPROBANTE DE EGRESO' : 'APORTE VOLUNTARIO';
+  const { receiptSeries, receiptNumber, date, type, isPartialPayment } = options;
+  let title = type === 'EXPENSE' ? 'COMPROBANTE DE EGRESO' : 'APORTE VOLUNTARIO';
+
+  if (isPartialPayment) {
+    title = type === 'EXPENSE' ? 'COMPROBANTE DE EGRESO (PARCIAL)' : 'APORTE VOLUNTARIO (PARCIAL)';
+  }
 
   const logo: Content = {
     image: path.join(process.cwd(), 'dist', 'assets', 'logo-can.png'),

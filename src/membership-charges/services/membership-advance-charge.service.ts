@@ -94,11 +94,12 @@ export class MembershipAdvanceChargeService {
           );
         }
 
-        generatedCount = await this.generationService.generateAdvanceCharges(
+        const chargeIds = await this.generationService.generateAdvanceCharges(
           tx,
           membership,
           nextCycles,
         );
+        generatedCount = chargeIds.length;
       });
 
       if (generatedCount === 0) {

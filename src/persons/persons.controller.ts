@@ -25,7 +25,9 @@ import {
 import { PersonsService } from './persons.service';
 import { CreatePersonDto } from './dto/create-person.dto';
 import { UpdatePersonDto } from './dto/update-person.dto';
+import { CreatePersonContactDto, UpdatePersonContactDto } from './dto/person-contact.dto';
 import { PersonPaginationDto } from './dto/pagination.dto';
+import { PersonsOptionsPaginationDto } from './dto/persons-options-pagination.dto';
 import { FormDataRequest } from 'nestjs-form-data';
 import {
   ApiStandardResponse,
@@ -73,6 +75,24 @@ export class PersonsController {
   @RequirePermissions('READ_PERSONS')
   async findAll(@Query() paginationDto: PersonPaginationDto) {
     return await this.personsService.findAll(paginationDto);
+  }
+
+  @Get('options')
+  @ApiOperation({
+    summary: 'Obtener lista de opciones de personas para select/autocomplete',
+    description: 'Retorna una lista paginada y filtrable de personas.',
+  })
+  @RequirePermissions(
+    'READ_PERSONS',
+    'CREATE_PLAYERS',
+    'CREATE_STUDENTS',
+    'CREATE_STAFF',
+    'CREATE_USERS',
+    'READ_TRANSACTIONS',
+    'CREATE_ACCOUNT_CHARGES',
+  )
+  async getOptions(@Query() paginationDto: PersonsOptionsPaginationDto) {
+    return await this.personsService.getPersonOptions(paginationDto);
   }
 
   @Get(':id/secretary-summary')
@@ -150,6 +170,66 @@ export class PersonsController {
   @ApiStandardResponse(PersonResponseDto, 'Persona eliminada exitosamente.')
   @RequirePermissions('DELETE_PERSONS')
   async remove(@Param('id', ParseUUIDPipe) id: string) {
-    return this.personsService.remove(id);
+    return await this.personsService.remove(id);
+  }
+
+  // ==========================================
+  // PERSON CONTACTS (Familia / Relaciones)
+  // ==========================================
+
+  @Get(':id/contacts')
+  @ApiOperation({
+    summary: 'Obtener contactos familiares',
+    description: 'Retorna la lista de contactos o familiares de esta persona.',
+  })
+  @ApiParam({ name: 'id', description: 'ID de la persona (UUID)', format: 'uuid' })
+  @RequirePermissions('READ_PERSONS')
+  async getContacts(@Param('id', ParseUUIDPipe) id: string) {
+    return await this.personsService.getContacts(id);
+  }
+
+  @Post(':id/contacts')
+  @ApiOperation({
+    summary: 'Agregar contacto familiar',
+    description: 'Registra a una persona existente como contacto familiar de esta persona.',
+  })
+  @ApiParam({ name: 'id', description: 'ID de la persona dueña del contacto (UUID)', format: 'uuid' })
+  @RequirePermissions('UPDATE_PERSONS')
+  async addContact(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CreatePersonContactDto,
+  ) {
+    return await this.personsService.addContact(id, dto);
+  }
+
+  @Patch(':id/contacts/:contactPersonId')
+  @ApiOperation({
+    summary: 'Actualizar contacto familiar',
+    description: 'Actualiza la relación o flags del contacto.',
+  })
+  @ApiParam({ name: 'id', description: 'ID de la persona dueña del contacto (UUID)', format: 'uuid' })
+  @ApiParam({ name: 'contactPersonId', description: 'ID de la persona que es el contacto (UUID)', format: 'uuid' })
+  @RequirePermissions('UPDATE_PERSONS')
+  async updateContact(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('contactPersonId', ParseUUIDPipe) contactPersonId: string,
+    @Body() dto: UpdatePersonContactDto,
+  ) {
+    return await this.personsService.updateContact(id, contactPersonId, dto);
+  }
+
+  @Delete(':id/contacts/:contactPersonId')
+  @ApiOperation({
+    summary: 'Eliminar contacto familiar',
+    description: 'Remueve el vínculo entre ambas personas de forma física.',
+  })
+  @ApiParam({ name: 'id', description: 'ID de la persona dueña del contacto (UUID)', format: 'uuid' })
+  @ApiParam({ name: 'contactPersonId', description: 'ID de la persona que es el contacto (UUID)', format: 'uuid' })
+  @RequirePermissions('UPDATE_PERSONS')
+  async removeContact(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('contactPersonId', ParseUUIDPipe) contactPersonId: string,
+  ) {
+    return await this.personsService.removeContact(id, contactPersonId);
   }
 }

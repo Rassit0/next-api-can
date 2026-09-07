@@ -8,9 +8,11 @@ import {
 } from '@nestjs/common';
 import { CreatePersonDto } from './dto/create-person.dto';
 import { UpdatePersonDto } from './dto/update-person.dto';
+import { CreatePersonContactDto, UpdatePersonContactDto } from './dto/person-contact.dto';
 import { PrismaService } from 'src/prisma.service';
 import { Prisma } from 'src/generated/prisma/client';
 import { PersonPaginationDto } from './dto/pagination.dto';
+import { PersonsOptionsPaginationDto, ExcludeRole } from './dto/persons-options-pagination.dto';
 
 export const PersonSelect: Prisma.PersonSelect = {
   id: true,
@@ -108,6 +110,90 @@ export class PersonsService {
     };
   }
 
+  async getPersonOptions(paginationDto: PersonsOptionsPaginationDto) {
+    const {
+      per_page = 10,
+      page = 1,
+      search,
+      orderBy = 'asc',
+      gender,
+      excludeRole,
+    } = paginationDto;
+    const skip = (page - 1) * per_page;
+
+    const searchTerms = search ? search.trim().split(/\s+/) : [];
+
+    const where: Prisma.PersonWhereInput = {
+      ...(searchTerms.length > 0
+        ? {
+            AND: searchTerms.map((term) => ({
+              OR: [
+                { name: { contains: term, mode: 'insensitive' } },
+                { lastName: { contains: term, mode: 'insensitive' } },
+                { secondLastName: { contains: term, mode: 'insensitive' } },
+                { documentNumber: { contains: term, mode: 'insensitive' } },
+              ],
+            })),
+          }
+        : {}),
+      ...(gender && { gender }),
+    };
+
+    if (excludeRole) {
+      if (excludeRole === ExcludeRole.PLAYER) where.players = null;
+      if (excludeRole === ExcludeRole.STUDENT) where.students = null;
+      if (excludeRole === ExcludeRole.STAFF) where.staff = null;
+      if (excludeRole === ExcludeRole.USER) where.user = null;
+    }
+
+    const [persons, totalItems] = await Promise.all([
+      this.prisma.person.findMany({
+        where,
+        take: per_page,
+        skip,
+        orderBy: [
+          { lastName: orderBy }, 
+          { secondLastName: orderBy }, 
+          { name: orderBy }, 
+          { id: 'asc' }
+        ],
+        select: {
+          id: true,
+          name: true,
+          lastName: true,
+          secondLastName: true,
+          documentType: true,
+          documentNumber: true,
+          gender: true,
+          birthDate: true,
+          imageUrl: true,
+        },
+      }),
+      this.prisma.person.count({ where }),
+    ]);
+
+    const totalPages = Math.ceil(totalItems / per_page);
+    const currentPage = totalItems === 0 ? 0 : page;
+
+    return {
+      message: 'Personas obtenidas exitosamente',
+      data: persons.map((person) => ({
+        ...person,
+        fullName: `${person.lastName || ''} ${person.secondLastName || ''} ${person.name}`.replace(/\s+/g, ' ').trim(),
+      })),
+      meta: {
+        totalItems,
+        itemsPerPage: per_page,
+        totalPages,
+        currentPage,
+        hasNextPage: page < totalPages,
+        hasPrevPage: page > 1,
+        nextPage: page < totalPages ? page + 1 : null,
+        prevPage: page > 1 ? page - 1 : null,
+      },
+    };
+  }
+
   async findOne(id: string) {
     const person = await this.prisma.person.findUnique({
       where: { id },
@@ -187,6 +273,11 @@ export class PersonsService {
                   },
                 },
               },
+              courseSeasonShift: {
+                include: {
+                  shift: true,
+                },
+              },
             },
             orderBy: { startedAt: 'desc' },
           })
@@ -256,6 +347,9 @@ export class PersonsService {
               },
             },
           },
+          payments: {
+            select: { amount: true, status: true },
+          },
         },
         orderBy: { dueDate: 'asc' },
       }),
@@ -284,13 +378,18 @@ export class PersonsService {
           status: pm.status,
           startedAt: pm.startedAt,
         })),
-        studentMemberships: studentMemberships.map((sm) => ({
-          id: sm.id,
-          courseName: sm.courseSeason.course.name,
-          institutionName: sm.courseSeason.season.institution.name,
-          status: sm.status,
-          startedAt: sm.startedAt,
-        })),
+        studentMemberships: studentMemberships.map((sm) => {
+          return {
+            id: sm.id,
+            courseName: sm.courseSeason.course.name,
+            institutionName: sm.courseSeason.season.institution.name,
+            status: sm.status,
+            startedAt: sm.startedAt,
+            shiftName: sm.courseSeasonShift?.shift?.name ?? null,
+            shiftStartTime: null,
+            shiftEndTime: null,
+          };
+        }),
         pendingCharges: charges.map((charge) => {
           let type = 'ACCOUNT';
           let originName = 'Cobro Manual';
@@ -304,7 +403,10 @@ export class PersonsService {
             const sm = charge.studentCharges[0].studentMembership;
             originName = sm.courseSeason.course.name;
           } else if (charge.accountCharge) {
-            originName = charge.accountCharge.category?.name || charge.accountCharge.title || 'Cobro Manual';
+            originName =
+              charge.accountCharge.category?.name ||
+              charge.accountCharge.title ||
+              'Cobro Manual';
           }
 
           return {
@@ -318,6 +420,9 @@ export class PersonsService {
             status: charge.status,
             type,
             originName,
+            membershipCharges: charge.membershipCharges.map(mc => ({ type: mc.type })),
+            studentCharges: charge.studentCharges.map(sc => ({ type: sc.type })),
+            payments: charge.payments,
           };
         }),
       },
@@ -326,5 +431,139 @@ export class PersonsService {
 
   remove(id: string) {
     return `This action removes a #${id} person`;
+  }
+
+  // ==========================================
+  // PERSON CONTACTS (Familia / Relaciones)
+  // ==========================================
+
+  async getContacts(personId: string) {
+    // Verificar que la persona existe
+    const person = await this.prisma.person.findUnique({ where: { id: personId } });
+    if (!person) {
+      throw new NotFoundException('La persona no existe');
+    }
+
+    const contacts = await this.prisma.personContact.findMany({
+      where: { personId },
+      include: {
+        contactPerson: {
+          select: {
+            id: true,
+            name: true,
+            lastName: true,
+            imageUrl: true,
+            email: true,
+            phone: true,
+            documentType: true,
+            documentNumber: true,
+          }
+        }
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+
+    return {
+      message: 'Contactos obtenidos exitosamente',
+      data: contacts,
+    };
+  }
+
+  async addContact(personId: string, dto: CreatePersonContactDto) {
+    if (personId === dto.contactPersonId) {
+      throw new BadRequestException('Una persona no puede ser contacto de sí misma');
+    }
+
+    // Verificar existencia de ambas personas de forma concurrente
+    const [person, contactPerson] = await Promise.all([
+      this.prisma.person.findUnique({ where: { id: personId } }),
+      this.prisma.person.findUnique({ where: { id: dto.contactPersonId } })
+    ]);
+
+    if (!person) throw new NotFoundException('La persona propietaria no existe');
+    if (!contactPerson) throw new NotFoundException('La persona a asignar como contacto no existe');
+
+    try {
+      const newContact = await this.prisma.personContact.create({
+        data: {
+          personId,
+          contactPersonId: dto.contactPersonId,
+          relationship: dto.relationship,
+          isEmergencyContact: dto.isEmergencyContact,
+          isBillingContact: dto.isBillingContact,
+        },
+        include: {
+          contactPerson: {
+            select: { id: true, name: true, lastName: true, imageUrl: true }
+          }
+        }
+      });
+
+      return {
+        message: 'Contacto agregado exitosamente',
+        data: newContact,
+      };
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        throw new ConflictException('Esta persona ya está registrada como contacto');
+      }
+      throw new InternalServerErrorException('Error al registrar contacto');
+    }
+  }
+
+  async updateContact(personId: string, contactPersonId: string, dto: UpdatePersonContactDto) {
+    const existing = await this.prisma.personContact.findUnique({
+      where: {
+        personId_contactPersonId: { personId, contactPersonId }
+      }
+    });
+
+    if (!existing) {
+      throw new NotFoundException('La relación de contacto no existe');
+    }
+
+    const updated = await this.prisma.personContact.update({
+      where: {
+        personId_contactPersonId: { personId, contactPersonId }
+      },
+      data: {
+        relationship: dto.relationship,
+        isEmergencyContact: dto.isEmergencyContact,
+        isBillingContact: dto.isBillingContact,
+      },
+      include: {
+        contactPerson: {
+          select: { id: true, name: true, lastName: true, imageUrl: true }
+        }
+      }
+    });
+
+    return {
+      message: 'Contacto actualizado exitosamente',
+      data: updated,
+    };
+  }
+
+  async removeContact(personId: string, contactPersonId: string) {
+    const existing = await this.prisma.personContact.findUnique({
+      where: {
+        personId_contactPersonId: { personId, contactPersonId }
+      }
+    });
+
+    if (!existing) {
+      throw new NotFoundException('La relación de contacto no existe');
+    }
+
+    await this.prisma.personContact.delete({
+      where: {
+        personId_contactPersonId: { personId, contactPersonId }
+      }
+    });
+
+    return {
+      message: 'Contacto eliminado exitosamente',
+      data: null,
+    };
   }
 }
